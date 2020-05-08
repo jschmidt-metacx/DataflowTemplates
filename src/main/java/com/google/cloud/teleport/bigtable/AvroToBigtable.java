@@ -30,8 +30,8 @@ import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.ValueProvider;
-import org.apache.beam.sdk.transforms.MapElements;
-import org.apache.beam.sdk.transforms.SimpleFunction;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.KV;
 
 /**
@@ -97,37 +97,41 @@ final class AvroToBigtable {
 
     pipeline
         .apply("Read from Avro", AvroIO.read(BigtableRow.class).from(options.getInputFilePattern()))
-        .apply("Transform to Bigtable", MapElements.via(new AvroToBigtableFn()))
+        .apply("Transform to Bigtable", ParDo.of(new DoFn<BigtableRow, KV<ByteString, Iterable<Mutation>>>() {
+          @ProcessElement
+          public void processElement(ProcessContext c) {
+            BigtableRow row = c.element();
+            ByteString key = toByteString(row.getKey());
+            ImmutableList.Builder<Mutation> mutations = null;
+            int mutationCount = 0;
+            int MAX_MUTATIONS_PER_CALL = 100000;
+            for (BigtableCell cell : row.getCells()) {
+              if (mutationCount == MAX_MUTATIONS_PER_CALL) {
+                c.outputWithTimestamp(KV.of(key, mutations.build()), c.timestamp());
+                mutationCount = 0;
+              }
+              if (mutationCount == 0) {
+                mutations = ImmutableList.builder();
+              }
+
+              SetCell setCell =
+                  SetCell.newBuilder()
+                      .setFamilyName(cell.getFamily().toString())
+                      .setColumnQualifier(toByteString(cell.getQualifier()))
+                      .setTimestampMicros(cell.getTimestamp())
+                      .setValue(toByteString(cell.getValue()))
+                      .build();
+              mutations.add(Mutation.newBuilder().setSetCell(setCell).build());
+              mutationCount++;
+            }
+            if (mutationCount > 0) {
+              c.outputWithTimestamp(KV.of(key, mutations.build()), c.timestamp());
+            }
+          }
+        }))
         .apply("Write to Bigtable", write);
 
     return pipeline.run();
-  }
-
-  /**
-   * Translates {@link BigtableRow} to {@link Mutation}s along with a row key. The mutations are
-   * {@link SetCell}s that set the value for specified cells with family name, column qualifier and
-   * timestamp.
-   */
-  static class AvroToBigtableFn
-      extends SimpleFunction<BigtableRow, KV<ByteString, Iterable<Mutation>>> {
-    @Override
-    public KV<ByteString, Iterable<Mutation>> apply(BigtableRow row) {
-      ByteString key = toByteString(row.getKey());
-      // BulkMutation doesn't split rows. Currently, if a single row contains more than 100,000
-      // mutations, the service will fail the request.
-      ImmutableList.Builder<Mutation> mutations = ImmutableList.builder();
-      for (BigtableCell cell : row.getCells()) {
-        SetCell setCell =
-            SetCell.newBuilder()
-                .setFamilyName(cell.getFamily().toString())
-                .setColumnQualifier(toByteString(cell.getQualifier()))
-                .setTimestampMicros(cell.getTimestamp())
-                .setValue(toByteString(cell.getValue()))
-                .build();
-        mutations.add(Mutation.newBuilder().setSetCell(setCell).build());
-      }
-      return KV.of(key, mutations.build());
-    }
   }
 
   /** Copies the content in {@code byteBuffer} into a {@link ByteString}. */
