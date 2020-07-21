@@ -20,6 +20,7 @@ import com.google.bigtable.v2.Cell;
 import com.google.bigtable.v2.Column;
 import com.google.bigtable.v2.Family;
 import com.google.bigtable.v2.Row;
+import com.google.bigtable.v2.RowFilter;
 import com.google.cloud.teleport.util.DualInputNestedValueProvider;
 import com.google.cloud.teleport.util.DualInputNestedValueProvider.TranslatorInput;
 import com.google.protobuf.ByteOutput;
@@ -99,9 +100,11 @@ public class BigtableToAvro {
 
   public static PipelineResult run(Options options) {
     Pipeline pipeline = Pipeline.create(options);
+    RowFilter filter = RowFilter.newBuilder().setCellsPerColumnLimitFilter(1).build();
 
     BigtableIO.Read read =
         BigtableIO.read()
+            .withRowFilter(filter)
             .withProjectId(options.getBigtableProjectId())
             .withInstanceId(options.getBigtableInstanceId())
             .withTableId(options.getBigtableTableId());
